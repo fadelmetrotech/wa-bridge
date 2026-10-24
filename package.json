@@ -1,0 +1,19 @@
+{
+  "name": "wa-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Links the client's WhatsApp (as a linked device, by QR code) so the platform sends the deposit details to the suppliers.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.112.3",
+    "@whiskeysockets/baileys": "6.7.24",
+    "pino": "9.14.0",
+    "qrcode": "1.5.4"
+  }
+}
