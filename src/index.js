@@ -1,5 +1,6 @@
 // WhatsApp bridge: the client's WhatsApp is linked like WhatsApp Web (QR code, « Appareils connectés »), and the platform
-// API asks this service to send the deposit details to a supplier as a normal message from his own number.
+// API asks this service to send the deposit details to a supplier, or to a group he is in, as a normal message from
+// his own number.
 // The session is kept in Supabase (whatsapp_bridge_state) so a restart reconnects without a new QR scan.
 // Every call except /health needs « Authorization: Bearer BRIDGE_SECRET ».
 import http from "node:http";
@@ -137,11 +138,15 @@ async function connect() {
 let queue = Promise.resolve();
 let lastSentAt = 0;
 
+const notConnected = () => Object.assign(new Error("WhatsApp n’est pas connecté : scannez le QR code dans la plateforme."), { statusCode: 503 });
+// A group is addressed by its id (…@g.us), a person by the number.
+const groupJid = /^[0-9]+(-[0-9]+)?@g\.us$/;
+
 function send(to, text) {
   const job = queue.then(async () => {
-    if (status !== "connected" || !sock) throw Object.assign(new Error("WhatsApp n’est pas connecté : scannez le QR code dans la plateforme."), { statusCode: 503 });
+    if (status !== "connected" || !sock) throw notConnected();
     await sleep(Math.max(0, lastSentAt + 4_000 + Math.random() * 3_000 - Date.now()));
-    const jid = `${to}@s.whatsapp.net`;
+    const jid = groupJid.test(to) ? to : `${to}@s.whatsapp.net`;
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
     await sleep(Math.min(4_000, 1_200 + text.length * 15));
     await sock.sendPresenceUpdate("paused", jid).catch(() => {});
@@ -151,6 +156,17 @@ function send(to, text) {
   });
   queue = job.catch(() => {});
   return job;
+}
+
+// The groups the client's WhatsApp is in. readOnly: only the group admins can write and he is not one of them.
+async function groups() {
+  if (status !== "connected" || !sock) throw notConnected();
+  const user = (id) => id?.split(":")[0]?.split("@")[0];
+  const own = [user(sock.user?.id), user(sock.user?.lid)].filter(Boolean);
+  return Object.values(await sock.groupFetchAllParticipating())
+    .map((group) => ({ id: group.id, name: group.subject || "Groupe sans nom", size: group.participants?.length ?? 0,
+      readOnly: Boolean(group.announce) && !group.participants?.some((member) => member.admin && own.includes(user(member.id))) }))
+    .sort((a, b) => a.name.localeCompare(b.name, "fr"));
 }
 
 // ---------- HTTP ----------
@@ -176,16 +192,18 @@ function readJson(request) {
 const server = http.createServer(async (request, response) => {
   const path = new URL(request.url || "/", "http://bridge").pathname;
   try {
-    if (request.method === "GET" && path === "/health") return reply(response, 200, { ok: true, status });
+    if (request.method === "GET" && path === "/health") return reply(response, 200, { ok: true, status, groups: true });
     if (!authorized(request)) return reply(response, 401, { error: "unauthorized" });
     if (request.method === "GET" && path === "/status") {
       return reply(response, 200, { status, connected: status === "connected", phone, qr: status === "qr" ? qrDataUrl : null, error: status === "connected" ? null : lastError });
     }
+    if (request.method === "GET" && path === "/groups") return reply(response, 200, { groups: await groups() });
     if (request.method === "POST" && path === "/send") {
       const body = await readJson(request);
-      const to = String(body.to || "").replace(/\D/g, "").replace(/^00/, "");
+      const given = String(body.to || "").trim();
+      const to = groupJid.test(given) ? given : given.replace(/\D/g, "").replace(/^00/, "");
       const text = String(body.text || "").trim();
-      if (!/^[0-9]{8,15}$/.test(to) || !text || text.length > 2_000) return reply(response, 422, { error: "Numéro ou message invalide." });
+      if (!(groupJid.test(to) || /^[0-9]{8,15}$/.test(to)) || !text || text.length > 2_000) return reply(response, 422, { error: "Numéro ou message invalide." });
       const id = await send(to, text);
       return reply(response, 200, { id });
     }
